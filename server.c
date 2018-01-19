@@ -1,33 +1,27 @@
-/*	Name:			Ben Gamble
-	File:			server.c
-	Date Created:	5/18/2017
-*/
+/*****************************************************************************
+	Author: Ben Gamble
+	Creation Date: 05/18/2017
+	Last Modified: 01/18/2018
+	Last Modified By: Ben Gamble
+	Description: Server that waits for a client to connect then receives a
+	message from the client.
+******************************************************************************/
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <unistd.h>
+#include <client_server.h>
+#include <sys/time.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <stdbool.h>
-	
-#define PORT 2500
-#define BUF_SIZE 1000 //Maximum size for messages
 
-void *server_register(void *arg);
-void *server_login(void *arg);
-void *server_msg(void *arg);
-void *server_disconnect(void *arg);
-void *server_clist(void *arg);
-void *server_flist(void *arg);
-void *server_fput(void *arg);
-void *server_fget(void *arg);
-int check_user(char filename[], char client_id[], char password[], int fdmax);
-void write_user(char filename[], int socketfd, char client_id[], char password[]);
-char *rem(char *string);
+void	*server_register(void *arg);
+void	*server_login(void *arg);
+void	*server_msg(void *arg);
+void	*server_disconnect(void *arg);
+void	*server_clist(void *arg);
+void	*server_flist(void *arg);
+void	*server_fput(void *arg);
+void	*server_fget(void *arg);
+int		check_user(char filename[], char client_id[], char password[], int fdmax);
+void	write_user(char filename[], int socketfd, char client_id[], char password[]);
+char	*rem(char *string);
 
 char const DISCONNECT[] = "DISCONNECT";
 char const REGISTER[] = "REGISTER";
@@ -45,160 +39,164 @@ char const INVALID_ID[] = "<0x03>";
 char const INVALID_IP[] = "<0x04>";
 char const INVALID_FORMAT[] = "<0xFF>";
 
-static int num_clients = 0;
-static int num_files = 0;
-int *logged_in;
+static int		num_clients = 0;
+static int		num_files = 0;
+int				*logged_in;
 pthread_mutex_t lock;
 
 typedef struct {
-	int server_socket;	//Master file descriptor
-	int fdmax;			//Largest file descriptor in set
-	int curr_fd;		//File descriptor for client sending message
-	char msg_recv[BUF_SIZE];
 	char command[100];
 	char client_id[100];
 	char password[100];
-	char filename[80];
 	char peer_filename[100]; //file name received from client
 	char peer_ip[100];       //ip of client that sent file
 	char peer_port[100];     //port of client that sent file
-	fd_set master;
 } thread_info;
 
-int main(int argc, char **argv)
+int main(
+	int argc, 
+	char **argv)
 {
-	if(argc < 2)
-	{
+	if(argc < 2) {
 		printf("Usage: %s <filename>\n", argv[0]);
-		return -1;
+		exit(EXIT_FAILURE);
 	}
 
-	thread_info fd;
-	int client_socket, sinlen, terror, msg_chk;
-	int count = 0;
-	int yes = 1;
-	char *temp = (char *)malloc(100);
-	char msg_copy[BUF_SIZE];
-	struct sockaddr_in sin;
-	FILE *flistfp; //File list file
-	FILE *clientfp; //Client list file
-	pthread_t thread;
-	fd_set read_fds;
-	FD_ZERO(&fd.master);
+	if((char *filename = (char *)malloc(256)) == NULL) {
+		perror("Failed to allocate memory");
+		exit(EXIT_FAILURE);
+	}
+	strcpy(filename, argv[1]);
+
+	FILE	*flistfp, *clientfp;
+	int		sfd, cfd, fdmax, msgerr, terror; 
+	int		yes = 1; // address is in use
+	int		count = 0;
+	char	filename[256], msg[BUFSZ], msg_copy[BUFSZ];
+	char	*temp = (char *)malloc(100);
+	
+	struct addrinfo			hints, *result, *rp;
+	struct sockaddr_storage	remoteaddr;
+	
+	socklen_t	addrlen;
+	thread_info	fd;
+	pthread_t	thread;
+	
+	fd_set	master;		// file descriptor list
+	fd_set	read_fds;   // temporary file descriptor list
+	FD_ZERO(&master);
 	FD_ZERO(&read_fds);
 
-	strcpy(fd.filename, argv[1]);
-
-	//Create the needed files in the current directory
-	//File for client list
-	if((clientfp = fopen(fd.filename, "wr+")) == 0)
-	{
+	strcpy(filename, argv[1]);
+	
+	// Create seperate files to hold the names of the registered clients and
+	// the list of available files for transfer
+	if((clientfp = fopen(fd.filename, "wr+")) == 0) {
 		perror("Failed to open file");
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 	fclose(clientfp);
-	//File for file list	
-	if((flistfp = fopen("flist", "wr+")) == 0)
-	{
+	if((flistfp = fopen("flist", "wr+")) == 0){
 		perror("Failed to open file");
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 	fclose(flistfp);
-
-	if((fd.server_socket = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-	{
-		perror("Socket error");
-		return -1;
-	}
-
-	sin.sin_family = AF_INET;
-	sin.sin_port = htons(PORT);
-	sin.sin_addr.s_addr = INADDR_ANY;
-	memset(sin.sin_zero, '\0', sizeof(sin.sin_zero));
-
-	//Set socket to non blocking
-	if(setsockopt(fd.server_socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
-	{
-		perror("Failed to set socket nonblocking");
-		return -1;
-	}
-
-	if(bind(fd.server_socket, (struct sockaddr *)&sin, sizeof(sin)) < 0)
-	{
-		perror("Failed to bind");
-		return -1;
-	}
-
-	//Listen for a client connection to the socket
-	if(listen(fd.server_socket, 5) < 0)
-	{
-		perror("Failed to listen");
-		return -1;
-	}
-
-	//Add the server file descriptor to the master set
-	FD_SET(fd.server_socket, &fd.master);
 	
-	sinlen = sizeof(sin);
-	fd.fdmax = fd.server_socket;
-	while(1)
-	{
-		read_fds = fd.master; //Transfer fds in master set to read set
-		/* Monitor the fds and see if they are ready for I/O
-		   Blocks until one of the fds are ready                    
-		   select(# of fds, read fds, write fds, except fds, timout value) */
-		if(select(fd.fdmax + 1, &read_fds, NULL, NULL, NULL) == -1)
-		{
-			perror("Select failed");
-			return -1;
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_INET; // IPv4
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+	if((int s = getaddrinfo(NULL, PORT, &hints, &result)) != 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
+		exit(EXIT_FAILURE);
+	}
+
+	// Try teh available addressus until one successfully binds
+	for(rp = results; rp != NULL; rp = rp->ai_next) {
+		if((sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)) < 0)
+			continue;
+		
+		// Remove "address in use" error
+		if(setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+			perror("Failed to set socket nonblocking");
+			exit(EXIT_FAILURE);
 		}
 
-		for(int i = 0; i < (fd.fdmax + 1); i++)
+		if(bind(sfd, rp->ai_addr, rp->ai_addrlen) < 0) {
+			close(sfd);
+			continue;
+		}
+		break;
+	}
+
+	if(rp == NULL) {
+		fprintf(stderr, "Failed to bind\n");
+		exit(EXIT_FAILURE);
+	}
+
+	freeaddrinfo(result);
+
+	if(listen(sfd, 10) < 0) {
+		perror("Failed to listen");
+		exit(EXIT_FAILURE);
+	}
+
+	// Add the listening socket file descriptor to the master set
+	FD_SET(sfd, &master);
+
+	// Current largest file descriptor
+	fdmax = sfd;
+
+	while(1) {
+		read_fds = master; // Transfer fds in master set to temp set
+
+		// Monitor the fds until one of them has characters to read
+		if(select(fdmax + 1, &read_fds, NULL, NULL, NULL) < 0) {
+			perror("Select failed");
+			exit(EXIT_FAILURE);
+		}
+
+		for(int i = 0; i <= fdmax; i++)
 		{
-			fd.curr_fd = i;
 			if(FD_ISSET(i, &read_fds)) //Check if the file descriptor is part of the set
 			{
-				if(i == fd.server_socket)
+				if(i == sfd)
 				{
-					//Accept new socket connection, if it fails exit otherwise add it to set
-					if((client_socket = accept(fd.server_socket, (struct sockaddr *)&sin, &sinlen)) < 0)
-					{
+					if((cfd = accept(sfd, (struct sockaddr *)&remoteaddr,
+									&addrlen)) < 0) {
 						perror("Failed to accept connection");
-						return -1;
+						exit(EXIT_FAILURE);
 					}
 					else
 					{
-						printf("Client connected to server.\n");
 						num_clients++;
-						//Add file descriptor for new socket connection to the master set
-						FD_SET(client_socket, &fd.master);
-						if(client_socket > fd.fdmax)
-						{
-							fd.fdmax = client_socket;
-						}
+						// Add file descriptor for new socket connection to the master set
+						FD_SET(cfd, &master);
+						if(cfd > fdmax)
+							fdmax = cfd;
+						printf("Client connected to server from %s on socket
+								%d.\n", inet_ntop(remoteaddr.ss_family,
+								get_in_addr((struct sockaddr*)&remoteaddr), remoteIP,
+								INET6_ADDRSTRLEN), cfd);
 					}
 				}
-				else
-				{
-					//Get new client message and check 1st argument
-					memset(fd.msg_recv, 0, sizeof(fd.msg_recv));
-					if((msg_chk = recv(i, fd.msg_recv, BUF_SIZE, 0)) < 0) 
-					{
+				else {
+					// Receive a message from the client
+					if((msgerr = recv(i, msg, BUF_SIZE, 0)) < 0) {
 						perror("Failed to receive message");
-						close(fd.curr_fd);
-						FD_CLR(fd.curr_fd, &fd.master);
+						close(i);
+						FD_CLR(i, &master);
 					}
-					else if(msg_chk == 0)
-					{
+					else if(msgerr == 0) {
 						printf("Client disconnected.\n");
 						num_clients--;
 						fflush(stdout);
-						close(fd.curr_fd);
-						FD_CLR(fd.curr_fd, &fd.master);
+						close(i);
+						FD_CLR(i, &master);
 					}
 					else
 					{
-						strcpy(msg_copy, fd.msg_recv);
+						strcpy(msg_copy, msg);
 						temp = strtok(msg_copy, ",");
 						//3 arguments in register and login message: <command, username, password>
 						if(strcmp(temp, REGISTER) == 0 || strcmp(temp, LOGIN) == 0)
@@ -372,6 +370,9 @@ int main(int argc, char **argv)
 		}
 	}
 
+	free(filename);
+	free(msg);
+	free(msg_copy);
 	free(temp);
 
 	return 0;

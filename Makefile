@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=-I.
-DEPS = network.h
+DEPS = client_server.h
 
 all: server client
 

@@ -1,26 +1,17 @@
-/*	Name:			Ben Gamble
-	File:			client.c
-	Date Created:	5/18/2017	*/
+/*****************************************************************************
+	Author: Ben Gamble
+	Creation Date: 05/18/2017
+	Last Modified: 01/18/2018
+	Last Modified By: Ben Gamble
+	Description: Client connects to a server and sends it a message.
+******************************************************************************/
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <string.h>
-#include <unistd.h>
+#include <client_server.h>
 #include <errno.h>
-#include <stdbool.h> #include <dirent.h>
+#include <dirent.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
-
-#define PORT 2500
-#define CLIENT_PORT 2501
-#define BUF_SIZE 1000 //Maximum size for messages
 
 void client_register(int socketfd);
 void client_login(int socketfd);
